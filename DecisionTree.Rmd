@@ -1,0 +1,202 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+### Importamos las librerias y escogemos el working directory.
+
+```{r}
+setwd("C:/Users/josen/OneDrive/Desktop/3° año UAI/Mineria de Datos/proyec mineria/proyecto 2")
+set.seed(123)
+pacman::p_load(tidyverse, tidymodels, discrim, naivebayes, nycflights13,corrplot,ggplot2,ggExtra,rpart.plot,rpart,pROC,tree,arules,caret,pROC,vip,caret,chron)
+```
+
+#### Extraemos la Data y creamos otra variable para guardarla.
+
+```{r}
+Data=read.csv("ALUMNOS-trainData.csv",header = TRUE,sep = ",",dec = ".")%>% 
+  mutate(
+    noshow = ifelse(noshow >= 4, 0, 1),
+    noshow = factor(noshow),
+    date = lubridate::as_date(date),
+    id = as.character(id),
+    fligth_number = as.character(fligth_number)
+    
+  )%>% 
+  na.omit() %>% 
+  mutate_if(is.character, as.factor)
+
+data_discreto<-Data
+```
+
+#### Comenzamos a discretizar para el modelo de decision Tree:
+
+##### primero vemos los analisamos cuales son los meses con más demanda.
+
+```{r}
+data_discreto$month<-as.numeric(format(data_discreto$date, "%m"))# extraemos el mes de la de la columna dates
+sort(table(data_discreto$month))
+#|--------------Demanda baja-------|    |------Demanda Alta----------------|
+# 8     4     2     3     5     6       9    11    10    12     7     1 
+# 64486 69097 69822 72443 80722 84413   87381 89624 92409 92872 96646 99975
+```
+
+##### Discretizamos la distancia:
+
+```{r}
+table(cut(data_discreto$distance, breaks=2,labels = c("viaje largo", "viaje corto"))) #obsevamos si hay como un corte o un gran diferencia en la distancia de los dintintos datos
+
+```
+
+#### todas las modificaciones correpondinetes.
+
+```{r}
+
+data_discreto<-data_discreto%>% mutate(month=case_when(
+  (month==8|month==4|month==2|month==3|month==5|month==6)~"baja",
+  (month==9|month==11|month==10|month==12|month==7|month==1)~"Alta"),month=factor(month),
+  
+  distance = cut(data_discreto$distance, breaks=2,labels = c("viaje largo", "viaje corto")),distance = factor(distance),
+  
+  departure_time=ifelse(chron(times. =departure_time)>= chron(times. = "12:00:00"),"Tarde","Mañana"),
+  departure_time=factor(departure_time))
+```
+
+# Iniciamos con el modelo.
+
+------------------------------------------------------------------------
+
+las variables que no se tomaran en desde el principio cuenta son las :
+
+-   id : dato innecesario, ya que no aporta a la clasificacion.
+
+-   fligth_number : dato innecesario, ya que no aporta a la clasificacion.
+
+-   origin : Dato no se puede incluir en la predicion dado a que son demasiadas categorias .
+
+-   destination : Dato no se puede incluir en la predicion dado a que son demasiadas categorias.
+
+```{r}
+#escogejos los columnas importantes
+data_discreto<-data_discreto%>% dplyr::select(p2p,pax_midlow,month,pax_freqflyer,denied_boarding,month,pax_midlow,departure_time,out_of_stock,bookings,noshow) %>%sample_n(100000)%>% na.omit()
+```
+
+```{=tex}
+Luego se fue seleccionando la variables que más aportaban a la clasificacion:
+
+1: Se seleciono ->p2p,pax_midlow,month,pax_freqflyer,denied_boarding,month,pax_midlow         ,departure_time,out_of_stock,bookings,noshow. De los cules los más importantes eran 
+   (bookings,pax_midlow,p2p,pax_freqflyer,departure_time,month,out_of_stoc,denied_boarding)
+  
+   
+```
+## Divición de la Data y creamos la cross validation.
+
+```{r}
+#
+set.seed(314)
+data_split <- initial_split(data_discreto, prop = 0.75, strata = noshow)
+
+data_training <- data_split %>% training()
+
+data_test <- data_split %>% testing()
+
+data_folds <- vfold_cv(data_training, v = 10)
+```
+
+## Receta.
+
+```{r}
+
+receta <- recipe(noshow ~ ., data = data_discreto) %>% step_dummy(all_nominal_predictors()) %>% step_zv(all_predictors())
+
+receta %>% prep() %>% bake(new_data = data_training)
+```
+
+## MODELO.
+
+```{r}
+tree_model <- decision_tree(cost_complexity = tune(),tree_depth = tune(),min_n = tune()) %>% set_engine('rpart') %>% set_mode('classification')
+
+tree_workflow <- workflow() %>% add_model(tree_model) %>% add_recipe(receta) 
+```
+
+## Buscamos los Hyperparametros
+
+```{r}
+tree_grid <- grid_regular(cost_complexity(),tree_depth(),min_n(),levels = 2)
+tree_grid
+```
+
+```{r}
+tree_tuning <- tree_workflow %>% tune_grid(resamples = data_folds,grid = tree_grid)
+
+tree_tuning %>% show_best('roc_auc')
+
+```
+
+## Selecionamos segun el modelo que tenga el mejor roc_auc.
+
+```{r}
+best_tree <- tree_tuning %>% select_best(metric = 'roc_auc')
+##vemos los parametros del modelo
+best_tree
+```
+
+```{r}
+
+```
+
+## Fit the Model.
+
+```{r}
+final_tree_workflow <- tree_workflow %>% finalize_workflow(best_tree)
+
+tree_wf_fit <- final_tree_workflow %>% fit(data = data_training )
+
+tree_fit <- tree_wf_fit %>% extract_fit_parsnip()
+
+rpart.plot(tree_fit$fit, roundint = FALSE)
+```
+
+# Variables Importantes.
+
+```{r}
+
+vip(tree_fit)
+```
+
+# Train y Evaluacion.
+
+```{r}
+tree_last_fit <- final_tree_workflow %>% last_fit(data_split)
+tree_last_fit %>% collect_metrics()
+```
+
+Evalucion del modelo.
+
+```{r}
+#ROC Curve
+tree_last_fit %>% collect_predictions() %>% roc_curve(truth  = noshow, estimate = .pred_1) %>% autoplot()
+
+tree_last_fit %>% collect_predictions() %>% accuracy(truth  = noshow, estimate =  .pred_class)
+
+#Confusion Matrix
+tree_predictions <- tree_last_fit %>% collect_predictions()
+
+M_CONFUCION=confusionMatrix(tree_predictions$.pred_class,data_test$noshow,mode = "everything", positive="1")
+M_CONFUCION
+
+
+
+```
+
+```{=tex}
+por lo que se observa si tomamos los como TP al  1(noshow>4) el modelo no lo predice bien dabido  a:
+Precision : 0.48411         
+Recall : 0.29228         
+F1 : 0.36450 
+a diferencia si se tratata de predecir los con los 0 (noshow<4) TP =0 el modelo si lo predice bien debido a :
+Precision : 0.6950          
+Recall : 0.8381          
+F1 : 0.7599 
+```

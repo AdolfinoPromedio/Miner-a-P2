@@ -1,0 +1,109 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Modelo Final
+
+Como grupo elegimos utilizar KNN debido a que era el mejor a la hora de ser manejado, permitía hacer variaciones de este de manera sencilla, y su implementación se hacía sin dificultades, siendo su mayor desventaja la gran demora que toma al hacer el entrenamiento y clasificación cuando los datos son muchos. Esto se vió influenciado debido a que tanto Naive Bayes como Decision Tree funcionaban de manera similar a KNN, por lo que su elección es meramente por su facilidad de uso.
+
+A continuación se predecirán los vuelos del dataframe "eval_data", bajo la clase de 1 o 0 en la variable de noshow.
+
+#### Cargamos librerías.
+
+```{r}
+library("dplyr")
+library("plyr")
+library("ggcorrplot")
+library("ggplot2")
+library("caret")
+library("factoextra")
+library("dbscan")
+library("cluster")
+pacman::p_load(dbscan, tidyverse, Rtsne, arules, class)
+library("NbClust")
+library("mclust")
+library("naniar")
+library("class")
+library("tidymodels")
+library(data.table)
+library('ROSE')
+```
+
+#### Cargamos los datos.
+
+\*Aquí se le debe dar correctamente la dirección del csv que contiene los datos de entrenamiento y de testeo.
+
+```{r}
+train_data <- read.csv("C:/Users/drago/OneDrive/Documents/Proyectos/ALUMNOS-trainData.csv")
+eval_data <- read.csv("C:/Users/drago/OneDrive/Documents/Proyectos/ALUMNOS-evalData.csv")
+
+```
+
+#### Limpieza de datos.
+
+```{r}
+train_data <- select_if(train_data, is.numeric) #Solo númericos
+train_data<- train_data[,-1] #Eliminamos Id
+train_data<- train_data[,-1] #Eliminamos Fligth_number
+
+eval_data <- select_if(eval_data, is.numeric) #Solo númericos
+eval_data<- eval_data[,-1] #Eliminamos Id
+eval_data<- eval_data[,-1] #Eliminamos Fligth_number
+
+train_data = train_data %>%   mutate(noshow = ifelse(noshow >= 4, 1, 0)) #Encoding
+train_data$noshow = as.factor(train_data$noshow) #Convertimos a factor para futuros usos practicos.
+```
+
+#### Modelo KNN.
+
+```{r}
+knn_cls_spec <- #Especificamos el modelo y los parametros
+  nearest_neighbor(neighbors = 170, weight_func = "triangular") %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+knn_process <- function(df){ #Función que hace el procesamiento con KNN
+  knn_cls_fit <- knn_cls_spec %>% fit(noshow ~ ., data = df)
+  return (knn_cls_fit)
+}
+
+classificator <- function(knndata, test){ #Función que predice y guarda esta clasificación en el dato de testeo.
+  a = bind_cols(
+    predict(knndata, test),
+  )
+  test = cbind(test, a)
+  return (test)
+}
+```
+
+#### Sample de datos.
+
+Hacemos un sample de 200000 datos dado que el usar la totalidad de los datos implica un gran tiempo de aprendizaje y clasificación que no vale la pena en términos de precisión. Además se hace un undersampling de este sample de 200000, que iguala la cantidad de datos con clasificación 1 y 0 (noshow), quedando finalmente 137634 datos que se utilzarán en el entrenamiento.
+
+```{r}
+train_data <- sample_n(train_data, 200000)
+train_data <- ovun.sample(noshow~., data = train_data, method = "under", N = 2*68817)$data
+table(train_data$noshow)
+
+
+```
+
+#### Entrenamiento y clasificación.
+
+```{r}
+knn_model = knn_process(train_data) #Entrenamos
+test = classificator(knn_model, eval_data) #Clasificamos
+```
+
+#### Guardamos las clasificaciones y exportamos.
+
+Se le debe entregar la dirección correcta de un csv donde se almacenarán los datos de evaluación con su respectiva nueva clasificación hecha por nuestro modelo.
+
+```{r}
+eval_data <- read.csv("C:/Users/drago/OneDrive/Documents/Proyectos/ALUMNOS-evalData.csv")
+eval_data = cbind(test$.pred_class, eval_data)
+colnames(eval_data)[1] <- "Predicted Class"
+
+write.csv(eval_data, file= "C:/Users/drago/OneDrive/Documents/Proyectos/evalData_classified.csv", row.names = FALSE)
+```

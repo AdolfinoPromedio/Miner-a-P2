@@ -1,0 +1,784 @@
+---
+title: "KNN"
+output: html_notebook
+---
+
+# KNN
+
+#### Cargamos los datos y las librerías correspondientes.
+
+\*Hay que dar correctamente el lugar del directorio donde se encuentran los archivos.
+
+```{r}
+library("dplyr")
+library("plyr")
+library("ggcorrplot")
+library("ggplot2")
+library("caret")
+library("factoextra")
+library("dbscan")
+library("cluster")
+pacman::p_load(dbscan, tidyverse, Rtsne, arules, class)
+library("NbClust")
+library("mclust")
+library("naniar")
+library("class")
+library("tidymodels")
+library(data.table)
+library('ROSE')
+#install.packages("ROSE")
+train_data <- read.csv("C:/Users/drago/OneDrive/Documents/Proyectos/ALUMNOS-trainData.csv")
+eval_data <- read.csv("C:/Users/drago/OneDrive/Documents/Proyectos/ALUMNOS-evalData.csv")
+```
+
+#### Limpieza de datos y encoding.
+
+Quitamos los daton duplicados si es que existen. (En este caso no existen).
+
+```{r}
+train_data = train_data[!duplicated(train_data[c("id", "fligth_number")]),]
+eval_data = eval_data[!duplicated(eval_data[c("id", "fligth_number")]),]
+train_data = distinct(train_data)
+```
+
+Vemos de que tipo son los datos de las columnas.
+
+```{r}
+str(train_data)
+```
+
+Solo consideramos los valores númericos y eliminamos los númericos que no aportan información.
+
+```{r}
+train_data <- select_if(train_data, is.numeric)
+train_data<- train_data[,-1] #Eliminamos Id
+train_data<- train_data[,-1] #Eliminamos Fligth_number
+```
+
+Hacemos encoding con la columna no show que es la que queremos predecir. 'YES' cuando hay 4 o más personas que no se presentaron, 'NO' en caso contrario.
+
+```{r}
+train_data = train_data %>%   mutate(noshow = ifelse(noshow >= 4, "YES", "NO")) #
+train_data$noshow = as.factor(train_data$noshow) #Convertimos a factor para futuros usos practicos.
+str(train_data$noshow)
+```
+
+Vemos si hay valores nulos. En este caso no existen.
+
+```{r}
+colSums(is.na(train_data))
+```
+
+Correlaciones. Las columnas más importantes son Bookings, revenue_usd, capacity, p2p, int_cnx, distance, pax_midlow y pax_low (poseen correlaciones fuertes entre ellas).
+
+```{r}
+ggcorrplot((round(cor(train_data[,-2]),2)), type = "lower",lab = TRUE)
+```
+
+Tomamos un sample. En este caso de 20000 datos. Con igual cantidad de datos de la columna NO y YES.
+
+```{r}
+set.seed(123)
+
+train_data_sample = sample_n(train_data, 30000) #Sample
+train_data_sample <- ovun.sample(noshow~., data=train_data_sample, method = "under", N = 2*10280)$data #Le decimos que elimine unos cuantos con YES para que queden parejos.
+print("Cantidad de datos según columna no show")
+table(train_data_sample$noshow)
+```
+
+#### Preprocesamientos. (Creación nuevos dataframes).
+
+A continuación se harán distintos procesamientos de datos para generar varios modelos para KNN, los cuales luego serán evaluados para ver cual tiene mejor rendimiento.
+
+##### Primero discretizaremos los datos. (train_data_sample_d)
+
+```{r}
+train_data_sample_d = train_data_sample
+discretizar <- function(train_data_sample_d){
+  train_data_sample_d$distance <- cut(train_data_sample_d$distance, breaks = c(0, 2000, 4000, 6000, 8000, 10000, Inf),
+                                      levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d = train_data_sample_d %>%   mutate(denied_boarding = ifelse(denied_boarding == 0, 0, 1))
+  
+  train_data_sample_d$pax_midlow <- cut(train_data_sample_d$pax_midlow, breaks = c(-1, 50, 100, 150, 200, 250, Inf),
+                                        levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$pax_high <- cut(train_data_sample_d$pax_high, breaks = c(-1, 25, 50, 75, 100, 125, Inf),
+                                      levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$pax_low <- cut(train_data_sample_d$pax_low, breaks = c(-1, 50, 100, 150, 200, 250, Inf),
+                                     levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$pax_midhigh <- cut(train_data_sample_d$pax_midhigh, breaks = c(-1, 20, 40, 60, 80, 100, Inf),
+                                         levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$pax_freqflyer <- cut(train_data_sample_d$pax_freqflyer, breaks = c(-1, 35, 70, 105, 140, 175, Inf),
+                                           levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d = train_data_sample_d %>%   mutate(group_bookings = ifelse(group_bookings == 0, 0, 1))
+  
+  train_data_sample_d$dom_cnx <- cut(train_data_sample_d$dom_cnx, breaks = c(-1, 1, 40, 80, 120, 160, Inf),
+                                     levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$int_cnx <- cut(train_data_sample_d$int_cnx, breaks = c(-1, 1, 65, 130, 195, 260, Inf),
+                                     levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$p2p <- cut(train_data_sample_d$p2p, breaks = c(-1, 1, 80, 160, 240, 320, Inf),
+                                 levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$capacity <- cut(train_data_sample_d$capacity, breaks = c(50, 105, 160, 215, 270, 325, Inf),
+                                      levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  
+  train_data_sample_d$revenues_usd <- cut(train_data_sample_d$revenues_usd, breaks = c(-1, 30000, 60000, 90000, 120000, 150000, 180000, 210000, 240000, 270000, 300000, Inf),
+                                          levels(train_data_sample_d) <- c("1","2","3","4","5", "6", "7", "8", "9", "10", "11"))
+  
+  train_data_sample_d$bookings <- cut(train_data_sample_d$bookings, breaks = c(-1, 95, 190, 285, 380, 475, Inf),
+                                      levels(train_data_sample_d) <- c("1","2","3","4","5", "6"))
+  return(train_data_sample_d)
+} #Función que discretiza ciertas columnas.
+train_data_sample_d = discretizar(train_data_sample_d)
+```
+
+##### Luego solo se guardaran las columnas con correlaciones importantes + la columna de noshow. (train_data_sample) y consideramos el con todas las columnas como train_data_sample_original.
+
+```{r}
+train_data_sample_original = train_data_sample #Guardamos el sample original
+train_data_sample = train_data_sample[, c(1,2,4,7,12,13,14,15,16)] 
+```
+
+##### Ahora serán las columnas con menor importancia. (train_data_sample_c)
+
+```{r}
+train_data_sample_c = train_data_sample_original[, c(2,3,5,6,8,9,10,11)]
+```
+
+##### Normalizamos. (train_data_sample_norm)
+
+```{r}
+train_data_sample_norm <- preProcess(train_data_sample, method=c("range"))
+train_data_sample_norm <- predict(train_data_sample_norm, train_data_sample)
+```
+
+##### Reducción de dimensionalidad con PCA. (train_data_sample_norm)
+
+Además se hace un plot para ver si se ve algo de información extra. (No se da el caso)
+
+```{r}
+train_data_sample_norm_pca = train_data_sample_norm
+pca_dim <- function(train_data_sample_norm_pca){
+  train_data_sample_norm_pca = prcomp(train_data_sample_norm[,-2]) #Usamos todas las columnas importantes menos noshow.
+  train_data_sample_norm_pca = as.data.frame(predict(train_data_sample_norm_pca))
+  train_data_sample_norm_pca = train_data_sample_norm_pca[,c(1,2)] #Solo usamos las 2 primeras columnas, que contienen mejor información y sirven para graficar.
+  train_data_sample_norm_pca = cbind(train_data_sample_norm_pca, train_data_sample$noshow) #Juntamos estas columnas con su correspondiente noshow.
+  names(train_data_sample_norm_pca)[names(train_data_sample_norm_pca) == "train_data_sample$noshow"] <- "noshow" #Cambiamos el nombre de la columna.
+  return(train_data_sample_norm_pca)
+} #Función que transforma con PCA.
+train_data_sample_norm_pca = pca_dim(train_data_sample_norm_pca)
+
+#Graficamos a ver como se ve con PCA. (No da mucha información.)
+ggplot(train_data_sample_norm_pca,
+       aes(x = PC1,
+           y = PC2,
+           col = as.factor(noshow))) + 
+  geom_point()
+```
+
+##### Reducción con TSNE
+
+Se hace un plot. No da información.
+
+```{r}
+train_data_sample_norm_tsne = train_data_sample_norm
+tsne_dim <- function(train_data_sample_norm_tsne){
+  train_data_sample_norm_tsne <- Rtsne(train_data_sample_norm[,-2])
+  train_data_sample_norm_tsne = as.data.frame(train_data_sample_norm_tsne$Y)
+  train_data_sample_norm_tsne = cbind(train_data_sample_norm_tsne, train_data_sample$noshow) #Juntamos con noshow.
+  names(train_data_sample_norm_tsne)[names(train_data_sample_norm_tsne) == "train_data_sample$noshow"] <- "noshow" #Cambiamos nombre columna.
+  return(train_data_sample_norm_tsne)
+} #Función que hace la reducción
+train_data_sample_norm_tsne = tsne_dim(train_data_sample_norm_tsne)
+
+#Graficamos para ver como se ve con TSNE. (Nuevamente no da mucha información.)
+ggplot(train_data_sample_norm_tsne,
+       aes(x = V1,
+           y = V2,
+           col = as.factor(noshow))) + 
+  geom_point()
+```
+
+### Construcción modelo.
+
+A continuación se definen ciertas variables y funciones que servirán a la hora de construir el modelo.
+
+Primero usaremos KNN con tidymodels y todos los modelos de la base de datos antes creados. Se usa un K arbitrario de 130.
+
+```{r}
+#Número de vecinos
+k=130
+
+#KNN con nearest_neighbor de tidymodels
+knn_cls_spec <- #Especificamos el modelo y los parametros
+  nearest_neighbor(neighbors = k, weight_func = "triangular") %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+knn_process <- function(df){ #Función que hace el procesamiento con KNN. Hace fit con la data.
+  knn_cls_fit <- knn_cls_spec %>% fit(noshow ~ ., data = df)
+  return (knn_cls_fit)
+}
+
+#Función que predice el tipo de clase del test correspondiente, y lo une al dataframe de test dado (además se muestra que tan cerca está de ser YES o NO en categoria noshow).
+classificator <- function(knndata, test){
+  a = bind_cols(
+    predict(knndata, test),
+    predict(knndata, test, type = "prob")
+  )
+  test = cbind(test, a)
+  return (test)
+}
+
+#Función que añade si una predicción es TrueNegative, TruePositive, FalseNegative o False_Positive (Con yes o no).
+confusion_df <- function(df_test){
+  print(table(df_test$noshow, df_test$.pred_class, dnn = c("Actual", "Predichos")))
+  df_test <- df_test %>%
+    mutate(Real_positive = if_else(noshow=="NO" & .pred_class=="NO", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(False_positive = if_else(noshow=="YES" & .pred_class=="NO", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(Real_negative = if_else(noshow=="YES" & .pred_class=="YES", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(False_negative = if_else(noshow=="NO" & .pred_class=="YES", "YES", "NO"))
+}
+
+#Función que devuelve matriz de confusión por cada dataframe dado.
+confusion_matrix <- function(df_test){
+  rp = table(df_test$Real_positive)
+  fp = table(df_test$False_positive)
+  rn = table(df_test$Real_negative)
+  fn = table(df_test$False_negative)
+  
+  matrix = matrix(c(fp[2],rp[2], rn[2], fn[2]), ncol=2, byrow=TRUE)
+  colnames(matrix)<- c("No","Yes")
+  rownames(matrix)<- c("Yes","No")
+  matrix = as.table(matrix)
+  return(matrix)
+}
+
+#Función que devuelve los valores de las predicciones.
+valores_val <- function(table_test){
+  #print(table_test)
+  precision = (table_test[1,2])/(table_test[1,2]+table_test[1,1])
+  recall = (table_test[1,2])/(table_test[1,2]+table_test[2,2])
+  F1 = (2*precision*recall)/(precision+recall)
+  print("La precision es de: ")
+  print(precision)
+  print("El recall es de: ")
+  print(recall)
+  print("El valor de F1 es de: ", F1)
+  print(F1)
+}
+
+#Función que reune las funciones anteriores
+final_model <- function(knndata, test){
+  test = classificator(knndata, test)
+  test = confusion_df(test)
+  matrix = confusion_matrix(test)
+  valores_val(matrix)
+  return(matrix)
+}
+```
+
+#### Probando modelos.
+
+Ahora se irá probando modelo a modelo y viendo sus metricas. (Separamos los datos (70% de entrenamiento y 30% de testeo). Se considera la clase NO como positive.
+
+Primero se hará con los el sample de los datos originales. KNN con tidymodels.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample_original$noshow, p=0.7, list = F) #Sample de datos original.
+train <- train_data_sample_original[t.ids, ]
+test <- train_data_sample_original[-t.ids, ]
+knn_data = knn_process(train) #Original
+matrix_data = final_model(knn_data,test) #Original
+```
+
+Solo columnas importantes.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample$noshow, p=0.7, list = F) #Sample de datos con solo columnas importantes.
+train <- train_data_sample[t.ids, ]
+test <- train_data_sample[-t.ids, ]
+knn_data = knn_process(train) #Columnas importantes
+matrix_data = final_model(knn_data,test)
+
+```
+
+Datos normalizados.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample_norm$noshow, p=0.7, list = F) #Sample de datos normalizados (solo columnas importantes).
+train <- train_data_sample_norm[t.ids, ]
+test <- train_data_sample_norm[-t.ids, ]
+knn_data = knn_process(train) #Normalizado
+matrix_data = final_model(knn_data,test) 
+```
+
+Datos con PCA.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample_norm_pca$noshow, p=0.7, list = F) #Sample de datos normalizados (columnas importantes) con pca.
+train <- train_data_sample_norm_pca[t.ids, ]
+test <- train_data_sample_norm_pca[-t.ids, ]
+knn_data = knn_process(train) #PCA
+matrix_data = final_model(knn_data,test) 
+```
+
+TSNE.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample_norm_tsne$noshow, p=0.7, list = F) #Sample de datos normalizados (columnas importantes) con Tsne.
+train <- train_data_sample_norm_tsne[t.ids, ]
+test <- train_data_sample_norm_tsne[-t.ids, ]
+knn_data = knn_process(train) #TSNE
+matrix_data = final_model(knn_data,test)
+```
+
+Discretizados.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample_d$noshow, p=0.7, list = F) #Sample de datos discretizados.
+train <- train_data_sample_d[t.ids, ]
+test <- train_data_sample_d[-t.ids, ]
+knn_data = knn_process(train) #Discretizados
+matrix_data = final_model(knn_data,test)
+```
+
+Columnas menos importanes.
+
+```{r}
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample_c$noshow, p=0.7, list = F) #Sample de datos con columnas menos importantes.
+train <- train_data_sample_c[t.ids, ]
+test <- train_data_sample_c[-t.ids, ]
+knn_data = knn_process(train) #Menos importantes
+matrix_data = final_model(knn_data,test)
+```
+
+Se puede concluir que el modelo sin modificaciones es el que mejor funciona, aunque no por mucho, ya que se obtiene un mejor valor de F1. Casi todos los modelos funcionan relativamente parecidos.
+
+Si bien el puntaje de F1 es decente, el modelo tiene problemas para clasificar correctamente tanto YES como NO, pero al menos es balanceado respecto a con cual va mejor. Esto es resultado de dividir los datos en mitas YES y mitas NO, ya que probando antes, cuando habían más datos con YES, predecía bien estos, pero muy mal los NO.
+
+#### Mejor parámetro.
+
+Ahora que vimos que el mejor comportamiento es con la data original, se buscará el mejor valor de K. (Gráfico adjunto, no es necesario correrlo ya que se demora).
+
+```{r}
+#Sample con igual cantidad de clasificaciones de 20000 datos.
+set.seed(123)
+train_data_sample = sample_n(train_data, 30000)
+train_data_sample <- ovun.sample(noshow~., data=train_data_sample, method = "under", N = 2*10280)$data
+table(train_data_sample$noshow)
+```
+
+```{r}
+#Separamos los datos (70% de entrenamiento y 30% de testeo.)
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample$noshow, p=0.7, list = F) #Sample de datos original.
+train <- train_data_sample[t.ids, ]
+test <- train_data_sample[-t.ids, ]
+
+#Aquí se hace fit y se hace un grafico que muestra los mejores valores para K
+ctrl <- trainControl(method = 'cv', number = 10)
+
+fit.cv <- train(noshow~., data = train, method = 'knn',
+                trControl = ctrl,
+                preProcess = c('center', 'scale'),
+                tuneGrid = data.frame(k=seq(10,300,by=5)))
+
+pred <- predict(fit.cv, test)
+confusionMatrix(table(test$noshow, pred))
+print(fit.cv)
+plot(fit.cv)
+```
+
+![](images/paste-59B86643.png){width="447"}
+
+#### Validación cruzada.
+
+Conociendo el mejor valor de K (170), ahora haremos validación cruzada. Se crearán 5 modelos identicos de tamaño y derivados de la data original, cada uno será divido por el 70% en train y 30% en test. Cada modelo probará cada conjunto de test, y cada test será probado con cada modelo. Se verán los rendimientos.
+
+```{r}
+#Sample con igual cantidad de clasificaciones de 200000 datos.
+set.seed(123)
+train_data_sample = sample_n(train_data, 200000)
+train_data_sample <- ovun.sample(noshow~., data=train_data_sample, method = "under", N = 2*68649)$data
+table(train_data_sample$noshow)
+```
+
+```{r}
+#Cross validation
+library(data.table)
+
+set.seed(123)
+modelos = split(train_data_sample, sample(1:5, nrow(train_data_sample), replace=T))
+modelo1 = rbindlist(modelos[1])
+modelo2 = rbindlist(modelos[2])
+modelo3 = rbindlist(modelos[3])
+modelo4 = rbindlist(modelos[4])
+modelo5 = rbindlist(modelos[5])
+
+#Separamos los datos (70% de entrenamiento y 30% de testeo.)
+set.seed(123)
+t.ids <- createDataPartition(modelo1$noshow, p=0.7, list = F)#Sample de datos original.
+train1 <- modelo1[t.ids, ]
+test1 <- modelo1[-t.ids, ]
+
+set.seed(123)
+t.ids <- createDataPartition(modelo2$noshow, p=0.7, list = F)#Sample de datos original.
+train2 <- modelo2[t.ids, ]
+test2 <- modelo2[-t.ids, ]
+
+set.seed(123)
+t.ids <- createDataPartition(modelo3$noshow, p=0.7, list = F)#Sample de datos original.
+train3 <- modelo3[t.ids, ]
+test3 <- modelo3[-t.ids, ]
+
+set.seed(123)
+t.ids <- createDataPartition(modelo4$noshow, p=0.7, list = F)#Sample de datos original.
+train4 <- modelo4[t.ids, ]
+test4 <- modelo4[-t.ids, ]
+
+set.seed(123)
+t.ids <- createDataPartition(modelo5$noshow, p=0.7, list = F)#Sample de datos original.
+train5 <- modelo5[t.ids, ]
+test5 <- modelo5[-t.ids, ]
+```
+
+Se usará KNN con Tidymodels, por lo que hay que indicar nuevamente lo siguiente:
+
+```{r}
+#Número de vecinos
+k=170
+
+#KNN con nearest_neighbor de tidymodels
+knn_cls_spec <- #Especificamos el modelo y los parametros
+  nearest_neighbor(neighbors = k, weight_func = "triangular") %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+knn_process <- function(df){ #Función que hace el procesamiento con KNN. Hace fit con la data.
+  knn_cls_fit <- knn_cls_spec %>% fit(noshow ~ ., data = df)
+  return (knn_cls_fit)
+}
+
+#Función que predice el tipo de clase del test correspondiente, y lo une al dataframe de test dado (además se muestra que tan cerca está de ser YES o NO en categoria noshow).
+classificator <- function(knndata, test){
+  a = bind_cols(
+    predict(knndata, test),
+    predict(knndata, test, type = "prob")
+  )
+  test = cbind(test, a)
+  return (test)
+}
+
+#Función que añade si una predicción es TrueNegative, TruePositive, FalseNegative o False_Positive (Con yes o no).
+confusion_df <- function(df_test){
+  df_test <- df_test %>%
+    mutate(Real_positive = if_else(noshow=="NO" & .pred_class=="NO", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(False_positive = if_else(noshow=="YES" & .pred_class=="NO", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(Real_negative = if_else(noshow=="YES" & .pred_class=="YES", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(False_negative = if_else(noshow=="NO" & .pred_class=="YES", "YES", "NO"))
+}
+
+#Función que devuelve matriz de confusión por cada dataframe dado.
+confusion_matrix <- function(df_test){
+  rp = table(df_test$Real_positive)
+  fp = table(df_test$False_positive)
+  rn = table(df_test$Real_negative)
+  fn = table(df_test$False_negative)
+  
+  matrix = matrix(c(fp[2],rp[2], rn[2], fn[2]), ncol=2, byrow=TRUE)
+  colnames(matrix)<- c("No","Yes (Predicho)")
+  rownames(matrix)<- c("Yes","No")
+  matrix = as.table(matrix)
+  return(matrix)
+}
+
+#Función que devuelve los valores de las predicciones.
+valores_val <- function(table_test){
+  #print(table_test)
+  precision = (table_test[1,2])/(table_test[1,2]+table_test[1,1])
+  recall = (table_test[1,2])/(table_test[1,2]+table_test[2,2])
+  F1 = (2*precision*recall)/(precision+recall)
+  print("La precision es de: ")
+  print(precision)
+  print("El recall es de: ")
+  print(recall)
+  print("El valor de F1 es de: ", F1)
+  print(F1)
+
+}
+
+#Función que reune las funciones anteriores
+final_model <- function(knndata, test){
+  test = classificator(knndata, test)
+  test = confusion_df(test)
+  matrix = confusion_matrix(test)
+  valores_val(matrix)
+  return(matrix)
+}
+```
+
+Creamos los modelos primero.
+
+```{r}
+knn_data1 = knn_process(train1) 
+knn_data2 = knn_process(train2) 
+knn_data3 = knn_process(train3) 
+knn_data4 = knn_process(train4) 
+knn_data5 = knn_process(train5) 
+```
+
+Luego vemos sus valores para cada conjunto de tests. ()
+
+```{r}
+print("Modelo 1 conjunto de testeo 1")
+final_model(knn_data1,test1)
+print("Modelo 1 conjunto de testeo 2")
+final_model(knn_data1,test2)
+print("Modelo 1 conjunto de testeo 3")
+final_model(knn_data1,test3)
+print("Modelo 1 conjunto de testeo 4")
+final_model(knn_data1,test4)
+print("Modelo 1 conjunto de testeo 5")
+final_model(knn_data1,test5)
+
+print("Modelo 2 conjunto de testeo 1")
+final_model(knn_data2,test1)
+print("Modelo 2 conjunto de testeo 2")
+final_model(knn_data2,test2)
+print("Modelo 2 conjunto de testeo 3")
+final_model(knn_data2,test3)
+print("Modelo 2 conjunto de testeo 4")
+final_model(knn_data2,test4)
+print("Modelo 2 conjunto de testeo 5")
+final_model(knn_data2,test5)
+
+print("Modelo 3 conjunto de testeo 1")
+final_model(knn_data1,test1)
+print("Modelo 3 conjunto de testeo 2")
+final_model(knn_data1,test2)
+print("Modelo 3 conjunto de testeo 3")
+final_model(knn_data1,test3)
+print("Modelo 3 conjunto de testeo 4")
+final_model(knn_data1,test4)
+print("Modelo 3 conjunto de testeo 5")
+final_model(knn_data1,test5)
+
+print("Modelo 4 conjunto de testeo 1")
+final_model(knn_data3,test1)
+print("Modelo 4 conjunto de testeo 2")
+final_model(knn_data3,test2)
+print("Modelo 4 conjunto de testeo 3")
+final_model(knn_data3,test3)
+print("Modelo 4 conjunto de testeo 4")
+final_model(knn_data3,test4)
+print("Modelo 4 conjunto de testeo 5")
+final_model(knn_data3,test5)
+
+print("Modelo 5 conjunto de testeo 1")
+final_model(knn_data4,test1)
+print("Modelo 5 conjunto de testeo 2")
+final_model(knn_data4,test2)
+print("Modelo 5 conjunto de testeo 3")
+final_model(knn_data4,test3)
+print("Modelo 5 conjunto de testeo 4")
+final_model(knn_data4,test4)
+print("Modelo 5 conjunto de testeo 5")
+final_model(knn_data4,test5)
+
+```
+
+Se puede observar que la validación cruzada confirma que los modelos se comportan de manera semejante. Se mantiene el valor de F1 de manera promedio además de las aseveraciones hechas antes.
+
+#### Modelo final.
+
+A modo de prueba se intenta predecir los valores de los datos mediante varios modelos identicos entre sí entrenados con datos diferentes. Luego se determina el valor de la clasificación predicha por mayoría.
+
+Rehacemos las funciones nuevamente.
+
+```{r}
+
+k=170
+
+knn_cls_spec <- #Especificamos el modelo y los parametros
+  nearest_neighbor(neighbors = k, weight_func = "triangular") %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+knn_process <- function(df){ #Función que hace el procesamiento con KNN
+  knn_cls_fit <- knn_cls_spec %>% fit(noshow ~ ., data = df)
+  return (knn_cls_fit)
+}
+
+classificator <- function(knndata, test,i){
+  a = bind_cols(
+    predict(knndata, test),
+  )
+  colnames(a) <- paste("Prediccion",i)
+  test = cbind(test, a)
+  return (test)
+}
+
+confusion_df <- function(df_test){
+  df_test <- df_test %>%
+    mutate(Real_positive = if_else(noshow=="NO" & sum=="NO", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(False_positive = if_else(noshow=="YES" & sum=="NO", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(Real_negative = if_else(noshow=="YES" & sum=="YES", "YES", "NO"))
+  df_test <- df_test %>%
+    mutate(False_negative = if_else(noshow=="NO" & sum=="YES", "YES", "NO"))
+}
+
+confusion_matrix <- function(df_test){
+  rp = table(df_test$Real_positive)
+  fp = table(df_test$False_positive)
+  rn = table(df_test$Real_negative)
+  fn = table(df_test$False_negative)
+  
+  matrix = matrix(c(fp[2],rp[2], rn[2], fn[2]), ncol=2, byrow=TRUE)
+  colnames(matrix)<- c("No","Yes (Predicho)")
+  rownames(matrix)<- c("Yes","No")
+  matrix = as.table(matrix)
+  return(matrix)
+}
+
+valores_val <- function(table_test){
+  precision = (table_test[1,2])/(table_test[1,2]+table_test[1,1])
+  recall = (table_test[1,2])/(table_test[1,2]+table_test[2,2])
+  F1 = (2*precision*recall)/(precision+recall)
+  print("La precision es de: ")
+  print(precision)
+  print("El recall es de: ")
+  print(recall)
+  print("El valor de F1 es de: ", F1)
+  print(F1)
+}
+```
+
+Dividimos un sample de 300000 en 80% train y 20% test. Luego dividimos train en 11.
+
+```{r}
+#Sample con igual cantidad de clasificaciones de 200000 datos.
+set.seed(123)
+train_data_sample = sample_n(train_data, 450000)
+train_data_sample = train_data_sample %>%   mutate(noshow = ifelse(noshow == 'YES', 1, 0))
+train_data_sample$noshow = as.factor(train_data_sample$noshow)
+train_data_sample <- ovun.sample(noshow~., data=train_data_sample, method = "under", N = 2*154867)$data
+table(train_data_sample$noshow)
+```
+
+```{r}
+#Separamos los datos (85% de entrenamiento y 15% de testeo.)
+set.seed(123)
+t.ids <- createDataPartition(train_data_sample$noshow, p=0.85, list = F)#Sample de datos original.
+train <- train_data_sample[t.ids, ]
+test <- train_data_sample[-t.ids, ]
+
+#Cross validation
+modelos = split(train, sample(1:11, nrow(train), replace=T))
+train1 = rbindlist(modelos[1])
+train2 = rbindlist(modelos[2])
+train3 = rbindlist(modelos[3])
+train4 = rbindlist(modelos[4])
+train5 = rbindlist(modelos[5])
+train6 = rbindlist(modelos[6])
+train7 = rbindlist(modelos[7])
+train8 = rbindlist(modelos[8])
+train9 = rbindlist(modelos[9])
+train10 = rbindlist(modelos[10])
+train11 = rbindlist(modelos[11])
+```
+
+Ahora hacemos los modelos. 11 modelos en este caso.
+
+```{r}
+knn1 = knn_process(train1) 
+knn2 = knn_process(train2) 
+knn3 = knn_process(train3) 
+knn4 = knn_process(train4) 
+knn5 = knn_process(train5) 
+knn6 = knn_process(train6) 
+knn7 = knn_process(train7) 
+knn8 = knn_process(train8) 
+knn9 = knn_process(train9) 
+knn10 = knn_process(train10) 
+knn11 = knn_process(train11) 
+```
+
+Luego clasificamos por cada modelo y añadimos la columna. Estas están como factor, las convertimos a números.
+
+```{r}
+test = classificator(knn1, test, "1")
+test = classificator(knn2, test, "2")
+test = classificator(knn3, test, "3")
+test = classificator(knn4, test, "4")
+test = classificator(knn5, test, "5")
+test = classificator(knn6, test, "6")
+test = classificator(knn7, test, "7")
+test = classificator(knn8, test, "8")
+test = classificator(knn9, test, "9")
+test = classificator(knn10, test, "10")
+test = classificator(knn11, test, "11")
+
+test$`Prediccion 1` <-as.numeric(as.character(test$`Prediccion 1` ))
+test$`Prediccion 2` <-as.numeric(as.character(test$`Prediccion 2` ))
+test$`Prediccion 3` <-as.numeric(as.character(test$`Prediccion 3` ))
+test$`Prediccion 4` <-as.numeric(as.character(test$`Prediccion 4` ))
+test$`Prediccion 5` <-as.numeric(as.character(test$`Prediccion 5` ))
+test$`Prediccion 6` <-as.numeric(as.character(test$`Prediccion 6` ))
+test$`Prediccion 7` <-as.numeric(as.character(test$`Prediccion 7` ))
+test$`Prediccion 8` <-as.numeric(as.character(test$`Prediccion 8` ))
+test$`Prediccion 9` <-as.numeric(as.character(test$`Prediccion 9` ))
+test$`Prediccion 10` <-as.numeric(as.character(test$`Prediccion 10` ))
+test$`Prediccion 11` <-as.numeric(as.character(test$`Prediccion 11` ))
+```
+
+```{r}
+#Vemos como queda el dataframe de test.
+head(test)
+```
+
+Luego vemos por mayoría en que clasificación está, si hay más de 6 modelos que predijeron que era cierta clase, se clasifica como tal.
+
+```{r}
+test['sum'] = test['Prediccion 1'] + test['Prediccion 2'] + test['Prediccion 3'] + test['Prediccion 4'] + test['Prediccion 5'] + test['Prediccion 6'] + test['Prediccion 7'] + test['Prediccion 8'] + test['Prediccion 9'] + test['Prediccion 10'] + test['Prediccion 11'] #Se suman los valores (1 si es YES, 0 si es NO)
+
+test = test %>%   mutate(sum = ifelse(sum >= 6, "YES", "NO")) #Vemos que hay de mayoría.
+test$sum = as.factor(test$sum)
+
+test$noshow <-as.numeric(as.character(test$noshow))
+test = test %>%   mutate(noshow = ifelse(noshow == 1, "YES", "NO")) #Yes cuando hay 4 o más personas que no se presentaron, No en caso contrario.
+test$noshow = as.factor(test$noshow) #Convertimos a factor para futuros usos practicos.
+```
+
+Ahora vemos el rendimiento.
+
+```{r}
+test = confusion_df(test)
+matrix = confusion_matrix(test)
+matrix
+valores_val(matrix)
+```
+
+Este modelo tiene un rendimiento aceptable, sobre todo si se busca obtener la mayor cantidad acertada de clase 0 en noshow. Además es un modelo de facil uso y facil manejo.

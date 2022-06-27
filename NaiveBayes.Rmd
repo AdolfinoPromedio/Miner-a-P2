@@ -1,0 +1,634 @@
+---
+title: "NaiveBayes"
+output: html_document
+---
+
+### Cargamos librerías
+
+```{r}
+setwd("C:/Users/Blopa/Desktop/Proyecto2")
+library("dplyr")
+library("plyr")
+library("ggcorrplot")
+library("ggplot2")
+library("caret")
+library("factoextra")
+library("dbscan")
+library("cluster")
+library("NbClust")
+library("mclust")
+library("e1071")
+library("discrim")
+pacman::p_load(dplyr, devtools, tidyverse, tidymodels, palmerpenguins, discrim, klaR, kknn, psych, Amelia, caret, tm, mice, corrplot, naniar, Rtsne, dbscan, arules, class, factoextra, mclust, pROC, ROSE)
+set.seed(42)
+```
+
+### Cargamos CSV
+
+```{r}
+train_data <- read.csv("ALUMNOS-trainData.csv")
+```
+
+### Limpieza de datos
+
+Analizamos estructura de datos:
+
+```{r}
+str(train_data)
+```
+
+Encoding:
+
+```{r}
+train_data = train_data %>%   mutate(noshow = ifelse(noshow >= 4, 1, 0))
+train_data$noshow = as.factor(train_data$noshow) 
+```
+
+Transformamos la columna "noshow" a Factor, la cual tendrá un valor "1" en caso de haber 4 o más personas que no se presentaron y "0" en caso contrario.
+
+Luego, seleccionamos solamente las columnas importantes y con valores numéricos:
+
+```{r}
+train_data <- dplyr::select(train_data, -c("date","origin","destination","departure_time"))
+```
+
+Vemos si hay valores nulos. En este caso no existen.
+
+```{r}
+colSums(is.na(train_data))
+```
+
+Realizamos un summary para conocer la cantidad de datos correspondientes a "0" y "1" de la columna "noshow". Esto nos permitirá observar qué tan desbalanceados están los datos.
+
+```{r}
+summary(train_data$noshow)
+```
+
+Podemos observar que hay una amplia diferencia entre la cantidad de "1" con respecto a los "0".
+
+En este caso, tenemos 3 opciones posibles. Realizar un "Oversampling" de los datos, un "Undersampling" o ambos juntos.
+
+El primero consiste en aumentar la cantidad de observaciones que tienen un valor "0" hasta igualar la cantidad de "1" existentes. Esto, como bien lo dice el nombre, produciría muchísimos más datos de los que inicialmente tendríamos en nuestro "train_data".
+
+Oversampling:
+
+```{r}
+train_data_over <- ovun.sample(noshow~., data = train_data, method = "over", N = 2*655277)$data
+table(train_data_over$noshow)
+```
+
+El segundo consiste en disminuir la cantidad de "1" hasta igualar la cantidad de "0" disponibles, lo que produciría un sample de nuestro "train_data" inicial con bastantes menos observaciones, lo que lo vuelve una muy buena opción para nuestro modelo.
+
+Undersampling:
+
+```{r}
+train_data_under <- ovun.sample(noshow~., data = train_data, method = "under", N = 2*344613)$data
+table(train_data_under$noshow)
+```
+
+Por último, tenemos el uso de ambos métodos, lo que produciría un balance entre "0" y "1" que no iguala cantidades, pero sí son muy parecidas. También lo convierte en una buena opción para nuestro modelo, ya que podríamos tener una predicción mucho más ajustada a la realidad sin necesidad de un entorno "perfecto".
+
+Both:
+
+```{r}
+train_data_both <- ovun.sample(noshow~., data=train_data, method = "both",
+                    p = 0.5,
+                    seed = 42,
+                    N = 999890)$data
+table(train_data_both$noshow)
+```
+
+### Modelo: Naive Bayes
+
+A continuación se harán distintos procesamientos de datos para generar varios modelos de Naive Bayes, los cuales luego serán evaluados para ver cual tiene mejor rendimiento.
+
+En primer lugar, creamos una función para evaluar los modelos de manera más optimizada:
+
+```{r}
+evaluar_modelo <- function(model, recipe, data_split){
+  model_wf <- workflow() %>% 
+    add_recipe(recipe) %>% 
+    add_model(model)
+  
+  nb_fit <- model_wf %>% 
+    fit_resamples(resamples = cv_folds)
+  
+  nb_final <- model_wf %>% 
+    last_fit(split = data_split)
+  
+  nb_test_pred <- bind_cols(
+    test,
+    nb_final %>% collect_predictions() %>% dplyr::select(starts_with(".pred_"))
+  )
+  
+  print(confusionMatrix(nb_test_pred$.pred_class, nb_test_pred$noshow, mode = "prec_recall", positive = "0"))
+  
+  print(auc(as.numeric(nb_test_pred$noshow),as.numeric(nb_test_pred$.pred_class)))
+  
+}
+```
+
+Luego, comenzamos con la creación de modelos y su procesamiento de datos correspondiente.
+
+Especificamos el modelo a utilizar:
+
+```{r}
+nb_model <- naive_Bayes(
+  mode = "classification",
+  smoothness = NULL,
+  Laplace = 1,
+  engine = "naivebayes"
+)
+```
+
+1.  Utilizando todos los datos (sin un sample u otro tipo de procesamiento):
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+2.  Utilizando Oversampling:
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_over) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_over, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Podemos notar que nuestro F1 aumenta considerablemente en comparación a la data inicial, por lo que podemos destacar que balancear los datos mejora bastante el rendimiento de nuestro modelo.
+
+3.  Utilizando Undersampling:
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_under) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_under, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Notemos que al igual que con Oversampling, nuestro F1 aumenta considerablemente con respecto a la data inicial, sin embargo el puntaje es un poco más bajo al obtenido anteriormente, esto se debe a la menor cantidad de observaciones presentes para realizar la predicción en comparación a la data con Oversampling.
+
+4.  Both (Oversampling & Undersampling):
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_both) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_both, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Notemos que en este caso el puntaje F1 sigue siendo menor a Oversampling, pero ligeramente menor a Undersampling, pero más del doble obtenido en comparación al F1 de la data inicial. Por lo que podemos concluir que es estrictamente necesario balancear los datos iniciales para que nuestro modelo pueda predecir de mejor manera.
+
+5.  Eliminando columnas que poseen una alta correlación:
+
+    Calculamos la correlación y modificamos el triángulo superior de la matriz.
+
+    ```{r}
+    cor_matrix <- cor(train_data[-4])
+    ggcorrplot(cor_matrix,lab = TRUE)
+
+    cor_matrix_rm <- cor_matrix 
+    cor_matrix_rm[upper.tri(cor_matrix_rm)] <- 0
+    diag(cor_matrix_rm) <- 0
+    ggcorrplot(cor_matrix_rm,lab = TRUE)
+    ```
+
+    Luego, eliminamos de los datos aquellas columnas que poseen una correlación mayor a "0.7".
+
+    ```{r}
+    train_data_corr <- train_data[ , !apply(cor_matrix_rm,2,function(x) any(x > 0.7))]
+    ```
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_corr) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_corr, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Notemos que al momento de eliminar las columnas con una mayor correlación dentro de la data inicial, nuestro puntaje de F1 aumenta bastante, sin embargo no es superior al de la data con procesada con Oversampling, Undersampling o ambas juntas. Probemos qué sucede cuando se eliminan las correlaciones altas dentro de una data balanceada.
+
+    Sin correlaciones altas + Oversampling:
+
+    Eliminamos de los datos aquellas columnas que poseen una correlación mayor a "0.7".
+
+    ```{r}
+    train_data_corr_over <- train_data_over[ , !apply(cor_matrix_rm,2,function(x) any(x > 0.7))]
+    ```
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_corr_over) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_corr_over, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Sin correlaciones altas + Undersampling:
+
+    Eliminamos de los datos aquellas columnas que poseen una correlación mayor a "0.7".
+
+    ```{r}
+    train_data_corr_under <- train_data_under[ , !apply(cor_matrix_rm,2,function(x) any(x > 0.7))]
+    ```
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_corr_under) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_corr_under, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Sin correlaciones altas + ambos métodos:
+
+    Eliminamos de los datos aquellas columnas que poseen una correlación mayor a "0.7".
+
+    ```{r}
+    train_data_corr_both <- train_data_both[ , !apply(cor_matrix_rm,2,function(x) any(x > 0.7))]
+    ```
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_corr_both) %>% 
+      update_role(id, fligth_number, new_role = "ID") %>% 
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_corr_both, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Después de haber hecho todas estas pruebas, no cabe duda que nuestro modelo mejora considerablemente al eliminar las columnas que poseen una alta correlación, y es que es una característica fundamental del modelo de Naive Bayes o Bayes Ingenuo, ya que este asume que todas las columnas son independientes entre sí. Además, nuestro puntaje de F1 sigue mejorando para los modelos sin alta correlación y Oversampling, Undersampling y ambos juntos. Sin embargo, aquí se produce un cambio, ya que el puntaje de F1 del modelo correspondiente a ambos métodos juntos superó al de Undersampling, pero sigue quedándose por debajo de Oversampling, lo que es esperable y ya fue explicado anteriormente.
+
+6.  Para los siguientes modelos, utilizaremos dos métodos de reducción de dimensionalidad (PCA y t-SNE, pero utilizando el método de Oversampling y Undersampling juntos, ya que consideramos que es el más aferrado a la realidad):
+
+    Por lo tanto, normalizamos los datos para evitar problemas a futuro.
+
+    ```{r}
+    train_data_norm <- preProcess(train_data_both, method=c("range"))
+    train_data_norm <- predict(train_data_norm, train_data_both)
+    ```
+
+    Generamos sample de los datos normalizados.
+
+    ```{r}
+    train_data_norm_sample = sample_n(train_data_norm, 10000)
+    ```
+
+    PCA:
+
+    ```{r}
+    train_data_norm_sample_pca = prcomp(train_data_norm_sample[,-4]) #Usamos todas las columnas importantes menos noshow.
+
+    train_data_norm_sample_pca = as.data.frame(predict(train_data_norm_sample_pca))
+    train_data_norm_sample_pca = train_data_norm_sample_pca[,c(1,2)] #Solo usamos las 4 primeras columnas, que contienen mejor información y sirven para graficar.
+
+    train_data_norm_sample_pca = cbind(train_data_norm_sample_pca, train_data_norm_sample$noshow) #Juntamos estas columnas con su correspondiente noshow.
+
+    names(train_data_norm_sample_pca)[names(train_data_norm_sample_pca) == "train_data_norm_sample$noshow"] <- "noshow" #Cambiamos el nombre de la columna.
+    ```
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_norm_sample_pca) %>%
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_norm_sample_pca, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+7.  t-SNE:
+
+    Removemos datos duplicados antes de utilizar t-SNE.
+
+    ```{r}
+    train_data_norm_sample = train_data_norm_sample[!duplicated(train_data_norm_sample[c("id", "fligth_number")]),]
+    train_data_norm_sample = distinct(train_data_norm_sample)
+    ```
+
+    Ocupando el sample de los datos normalizados, procedemos a crear un modelo con t-SNE.
+
+    ```{r}
+    train_data_norm_sample_tsne <- Rtsne(train_data_norm_sample[,-4])
+    train_data_norm_sample_tsne = as.data.frame(train_data_norm_sample_tsne$Y)
+    train_data_norm_sample_tsne = cbind(train_data_norm_sample_tsne, train_data_norm_sample$noshow) #Juntamos con noshow.
+    names(train_data_norm_sample_tsne)[names(train_data_norm_sample_tsne) == "train_data_norm_sample$noshow"] <- "noshow" #Cambiamos nombre columna.
+    ```
+
+    Receta.
+
+    ```{r}
+    flights_rec <- 
+      recipe(noshow ~ ., data = train_data_norm_sample_tsne) %>%
+      step_dummy(all_nominal_predictors()) %>% 
+      step_zv(all_predictors())
+    ```
+
+    Workflow.
+
+    ```{r}
+    flights_wf <- workflow() %>% 
+      add_recipe(flights_rec) %>% 
+      add_model(nb_model)
+    ```
+
+    Dividimos los datos (entrenamiento y prueba).
+
+    ```{r}
+    flights_split <- initial_split(train_data_norm_sample_tsne, strata = "noshow")
+    train <- training(flights_split)
+    test <- testing(flights_split)
+    ```
+
+    Validación cruzada.
+
+    ```{r}
+    cv_folds <- vfold_cv(data = train, v = 5)
+    ```
+
+    Evaluamos el modelo.
+
+    ```{r}
+    nb = evaluar_modelo(nb_model, flights_rec, flights_split)
+    ```
+
+    Podemos notar que la reducción de dimensionalidad no es muy buena opción para los modelos del tipo Naive Bayes, ya que los puntajes obtenidos en PCA y t-SNE están por debajo de aquellos obtenidos en los procedimientos anteriores e incluso el área bajo la curva es bastante menor en comparación a estos. Sin embargo, pueden ser opción para optimizar la rapidez del modelo en pos de sacrificar un poco de rendimiento, ya que el tiempo de carga es considerablemente menor.
+
+### Conclusión
+
+Hemos podido analizar distintas opciones para mejorar el rendimiento de nuestros modelos, partiendo por balancear correctamente los datos iniciales, pasando por eliminar aquellas columnas con altas correlaciones y por úlimo reduciendo la dimensionalidad de los datos. Sin embargo, solamente podemos confirmar dos cosas. Primero, es estrictamente necesario equilibrar los datos antes de predecir y segundo, eliminar columnas de alta correlación también es indispensable para obtener un modelo relativamente bueno. Además, los mejores rendimientos fueron obtenidos realizando un Oversampling de los datos, pero no consideramos que esto puede causar una "falsa sensación" de un buen rendimiento, ya que tendríamos muchos más datos en nuestra piscina de predicción, lo que no es bueno para una empresa que requiere de precisión para el manejo de datos. Dado esto, el puntaje más real obtenido fue con el modelo que no poseía columnas de alta correlación, sumado a un Oversampling & Undersampling de datos (Both), lo que produjo tener datos balanceados y con la misma cantidad que la data inicial, por lo que se puede decir que es un modelo mucho más aferrado a la realidad, además de tener un moderado puntaje al calcular el AUC. Si bien no es un modelo perfectamente bueno, es un modelo decente para predicciones de este estilo (tomando en cuenta nuestra "Positive" Class = "0").
